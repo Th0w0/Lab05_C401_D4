@@ -1,5 +1,8 @@
 Dựa trên yêu cầu từ ảnh **SPEC draft — 6 items** bạn vừa gửi, mình sẽ thiết lập khung tài liệu (draft) cho con chatbot VinFast (mảng AI cho ô tô/hậu mãi) của bạn. Đây là cách tiếp cận chuẩn "product mindset" cho một dự án AI:
 
+## Problem state
+Người dùng tìm kiếm thông tin về sản phẩm và chính sách của VinFast thông qua chatbot, nhưng hệ thống thường cung cấp thông tin sai, thiếu hoặc không cập nhật, trong khi không có cơ chế giúp người dùng nhận biết độ tin cậy của câu trả lời.
+
 ---
 # 1. AI Product Canvas
 ## Canvas
@@ -194,9 +197,33 @@ Yếu ở:
 + câu hỏi cần thông tin cập nhật
 + câu hỏi phức tạp
 
+# 3. Eval-metric
+# Eval metrics + threshold
+**Tại sao precision?**
+Chatbot trả lời về giá xe, chi phí sạc, chính sách bảo hành của VinFast — nếu sai sẽ làm mất niềm tin và ảnh hưởng trực tiếp đến quyết định mua. Sai thông tin (false positive) nguy hiểm hơn không trả lời.
+
+Nếu sai ngược lại thì sao? Nếu optimize recall, chatbot trả lời nhiều hơn nhưng dễ hallucinate (bịa thông tin), user thấy nói linh tinh thì mất trust và không sử dụng chat bot nữa.
+
+## Metrics table
+
+| Metric | Threshold | Red flag (dừng khi) |
+|--------|-----------|---------------------|
+| Precision | ≥90% | <80% trong 1 tuần |
+| Latency | <2s | >5s |
+| Escalation rate | <30% | >50% |
+| User satisfaction | ≥4/5 | <3/5 trong 2 tuần |
+
+**Nguyên tắc thiết kế:**  
+Hệ thống cần tối ưu độ chính xác cao để duy trì niềm tin, độ trễ thấp để đảm bảo trải nghiệm người dùng tốt, và tỷ lệ chuyển sang nhân viên thấp để tạo ra giá trị kinh doanh thực sự.
 
 
 
+## Phân công
+- Việt: Canvas + User stories
+- Tuấn: code agent
+- Đạt: Failure modes
+- Thư: Eval-metrics
+- Hải Ninh: ROI
 
 ## Cách dùng
 

@@ -104,6 +104,20 @@ class PlannerResult:
     errors: List[str] = field(default_factory=list)
 
 
+@dataclass
+class PlannerPolicy:
+    mode: str = "balanced"  # min_time | min_cost | min_stops | balanced
+    max_corridor_km: float = 15.0
+    min_charger_power_kw: float = 0.0
+    preferred_min_arrival_soc_percent: float = 10.0
+
+    weight_drive_time: float = 1.0
+    weight_charge_time: float = 1.0
+    weight_charge_cost: float = 0.001
+    weight_num_stops: float = 25.0
+    weight_low_soc_risk: float = 3.0
+
+
 # =========================================================
 # Tool 1: Travel Time Tool
 # =========================================================
@@ -330,7 +344,10 @@ class EVTripPlanner:
         stops: List[Stop],
         vehicle: Vehicle,
         battery: BatteryState,
+        policy: Optional[PlannerPolicy] = None,
     ) -> PlannerResult:
+        if policy is None:
+            policy = PlannerPolicy()
         warnings = []
         destination = stops[-1].name
         
@@ -343,7 +360,7 @@ class EVTripPlanner:
             return self._fail(str(e), battery)
 
         # 2. Find chargers along route corridor
-        near_chargers = self.station_selector.find_chargers_near_route(polyline, threshold_km=15.0)
+        near_chargers = self.station_selector.find_chargers_near_route(polyline, threshold_km=policy.max_corridor_km)
         print(f"📍 FOUND {len(near_chargers)} CHARGERS NEAR ROUTE CORRIDOR.")
 
         # 3. Geocode start and destination
@@ -357,22 +374,24 @@ class EVTripPlanner:
         import heapq
         nodes = [{"name": start_location, "type": "origin", "lat": start_lat, "lon": start_lon}]
         for c in near_chargers:
-            nodes.append({"name": c.station_name, "type": "charger", "lat": c.lat, "lon": c.lon, "charger": c})
+            if c.power_kw >= policy.min_charger_power_kw:
+                nodes.append({"name": c.station_name, "type": "charger", "lat": c.lat, "lon": c.lon, "charger": c})
         nodes.append({"name": destination, "type": "destination", "lat": dest_lat, "lon": dest_lon})
         
         n_count = len(nodes)
-        min_times = [float("inf")] * n_count
+        best_metrics = [float("inf")] * n_count
         parents = [-1] * n_count
         soc_at_node = [0.0] * n_count
         edge_details = [None] * n_count
         
-        queue = [(0.0, 0, battery.start_soc_percent)] # (time, node_idx, current_soc)
-        min_times[0] = 0.0
+        # metric is either total_time (min_time) or total_cost (min_cost)
+        queue = [(0.0, 0, battery.start_soc_percent)] 
+        best_metrics[0] = 0.0
         soc_at_node[0] = battery.start_soc_percent
         
         while queue:
-            curr_time, u_idx, u_soc = heapq.heappop(queue)
-            if curr_time > min_times[u_idx]: continue
+            curr_metric, u_idx, u_soc = heapq.heappop(queue)
+            if curr_metric > best_metrics[u_idx]: continue
             u = nodes[u_idx]
             d_u_dest = haversine(u["lat"], u["lon"], dest_lat, dest_lon)
             
@@ -422,9 +441,30 @@ class EVTripPlanner:
                     else: continue
                 
                 v_arrival_soc = actual_u_soc - energy_est["soc_used_percent"]
-                new_total_time = curr_time + charge_time + drive_time
-                if new_total_time < min_times[v_idx]:
-                    min_times[v_idx] = new_total_time
+                
+                charge_cost = charge_info["charging_cost_vnd"] if charge_info else 0.0
+                num_stops = 1.0 if charge_info else 0.0
+                low_soc_risk = max(0.0, policy.preferred_min_arrival_soc_percent - v_arrival_soc)
+                
+                if policy.mode == "min_time":
+                    step_metric = drive_time + charge_time
+                elif policy.mode == "min_cost":
+                    step_metric = charge_cost
+                elif policy.mode == "min_stops":
+                    step_metric = num_stops
+                else: # balanced
+                    step_metric = (
+                        drive_time * policy.weight_drive_time +
+                        charge_time * policy.weight_charge_time +
+                        charge_cost * policy.weight_charge_cost +
+                        num_stops * policy.weight_num_stops +
+                        low_soc_risk * policy.weight_low_soc_risk
+                    )
+                
+                new_total_metric = curr_metric + step_metric
+                
+                if new_total_metric < best_metrics[v_idx]:
+                    best_metrics[v_idx] = new_total_metric
                     parents[v_idx] = u_idx
                     soc_at_node[v_idx] = v_arrival_soc
                     edge_details[v_idx] = {
@@ -436,10 +476,10 @@ class EVTripPlanner:
                         },
                         "charge": charge_info
                     }
-                    heapq.heappush(queue, (new_total_time, v_idx, v_arrival_soc))
+                    heapq.heappush(queue, (new_total_metric, v_idx, v_arrival_soc))
 
         dest_idx = n_count - 1
-        if min_times[dest_idx] == float("inf"):
+        if best_metrics[dest_idx] == float("inf"):
             return self._fail("Không tìm thấy lộ trình khả thi.", battery)
             
         final_itinerary = []
@@ -499,22 +539,36 @@ def haversine(lat1, lon1, lat2, lon2):
 
 def build_mock_chargers() -> Dict[str, List[Charger]]:
     chargers = {
-        "Ha Noi": [Charger("HN_DC_01", "VinFast Ha Noi Fast", 60, 3000, address="Số 1 Thanh Huệ Trại, Đa Phúc, Hà Nội, Vietnam", city="Hà Nội", province="Hà Nội", lat=21.23182, lon=105.86744)],
-        "Thanh Hoa": [
-            Charger("TH_DC_01", "VinFast Bim Son", 60, 3100, address="134 Ngõ 430 Trần Phú, phường Lam Sơn, thị xã Bỉm Sơn, Thanh Hóa, Vietnam", city="Bỉm Sơn", province="Thanh Hóa", lat=20.07097, lon=105.88590),
-            Charger("TH_DC_02", "VinFast TP Thanh Hoa", 60, 3100, address="Tân Hạnh, Đông Tân, Thành phố Thanh Hóa, Thanh Hóa, Vietnam", city="Thành phố Thanh Hóa", province="Thanh Hóa", lat=19.72846, lon=105.83582),
+        "Ha Noi": [
+            Charger("HN_DC_01", "VinFast Ha Noi Fast", 60, 3000, address="Số 1 Thanh Huệ Trại, Đa Phúc, Hà Nội", city="Hà Nội", province="Hà Nội", lat=21.23182, lon=105.86744)
         ],
-        "Vinh": [Charger("VI_DC_01", "VinFast Vinh", 60, 3200, address="Khối 3, Phường Vinh Lộc, Nghệ An, Vietnam", city="Vinh Lộc", province="Nghệ An", lat=18.73988, lon=105.70926)],
-        "Ha Tinh": [Charger("HT_DC_01", "VinFast Ha Tinh", 60, 3200, address="Số 25 Ngõ 247 Quang Trung, Trần Phú, Hà Tĩnh, Vietnam", city="Hà Tĩnh", province="Hà Tĩnh", lat=18.36854, lon=105.89462)],
+        "Thanh Hoa": [
+            Charger("TH_DC_01", "VinFast Bim Son", 60, 3100, address="134 Ngõ 430 Trần Phú, phường Lam Sơn, thị xã Bỉm Sơn", city="Bỉm Sơn", province="Thanh Hóa", lat=20.07097, lon=105.88590),
+            Charger("TH_DC_02", "VinFast TP Thanh Hoa", 60, 3100, address="Tân Hạnh, Đông Tân, Thành phố Thanh Hóa", city="Thành phố Thanh Hóa", province="Thanh Hóa", lat=19.72846, lon=105.83582),
+            Charger("TH_DC_03", "SuperCharge Thanh Hoa", 250, 4800, address="Quốc Lộ 1A, Thanh Hóa", city="Thanh Hóa", province="Thanh Hóa", lat=19.78000, lon=105.80000),
+            Charger("TH_DC_04", "EcoCharge Thanh Hoa", 30, 2000, address="Đường Nhánh, Thanh Hóa", city="Thanh Hóa", province="Thanh Hóa", lat=19.75000, lon=105.82000),
+        ],
+        "Vinh": [
+            Charger("VI_DC_01", "VinFast Vinh", 60, 3200, address="Khối 3, Phường Vinh Lộc, Nghệ An", city="Vinh Lộc", province="Nghệ An", lat=18.73988, lon=105.70926),
+            Charger("VI_DC_02", "FlashCharge Vinh", 250, 5000, address="Nút giao Cao Tốc, Nghệ An", city="Vinh", province="Nghệ An", lat=18.80000, lon=105.65000),
+            Charger("VI_DC_03", "CheapCharge Vinh", 22, 1800, address="Đường nhỏ, Nghệ An", city="Vinh", province="Nghệ An", lat=18.70000, lon=105.72000),
+        ],
+        "Ha Tinh": [
+            Charger("HT_DC_01", "VinFast Ha Tinh", 60, 3200, address="Số 25 Ngõ 247 Quang Trung, Trần Phú, Hà Tĩnh", city="Hà Tĩnh", province="Hà Tĩnh", lat=18.36854, lon=105.89462)
+        ],
         "Quang Binh": [
-            Charger("QB_DC_01", "VinFast Quang Binh 1", 60, 3200, address="Thôn Vân Tiền, xã Quảng Lưu, huyện Quảng Trạch, Quảng Bình, Vietnam", city="Quảng Trạch", province="Quảng Bình", lat=17.81705, lon=106.37773),
-            Charger("QB_DC_02", "VinFast Quang Binh 2", 60, 3200, address="Chòm 6, thôn Trung Minh, xã Quảng Châu, huyện Quảng Trạch, Quảng Bình, Vietnam", city="Quảng Trạch", province="Quảng Bình", lat=17.88025, lon=106.41266),
+            Charger("QB_DC_01", "VinFast Quang Binh 1", 60, 3200, address="Thôn Vân Tiền, xã Quảng Lưu, huyện Quảng Trạch", city="Quảng Trạch", province="Quảng Bình", lat=17.81705, lon=106.37773),
+            Charger("QB_DC_02", "VinFast Quang Binh 2", 60, 3200, address="Chòm 6, thôn Trung Minh, xã Quảng Châu, huyện Quảng Trạch", city="Quảng Trạch", province="Quảng Bình", lat=17.88025, lon=106.41266),
+            Charger("QB_DC_03", "HyperCharge Quang Binh", 350, 5200, address="Trạm dừng nghỉ Quảng Trạch", city="Quảng Trạch", province="Quảng Bình", lat=17.85000, lon=106.40000),
         ],
         "Hue": [
-            Charger("HU_DC_01", "VinFast Hue 1", 120, 3200, address="16 Kiệt 85 Trưng Nữ Vương, Phường Phú Bài, Huế, Vietnam", city="Huế", province="Huế", lat=16.40783, lon=107.66756),
-            Charger("HU_DC_02", "VinFast Hue 2", 120, 3200, address="32/72 Dương Thiệu Tước, Phường Thanh Thủy, Huế, Vietnam", city="Huế", province="Huế", lat=16.44187, lon=107.61362),
+            Charger("HU_DC_01", "VinFast Hue 1", 120, 3200, address="16 Kiệt 85 Trưng Nữ Vương, Phường Phú Bài, Huế", city="Huế", province="Huế", lat=16.40783, lon=107.66756),
+            Charger("HU_DC_02", "VinFast Hue 2", 120, 3200, address="32/72 Dương Thiệu Tước, Phường Thanh Thủy, Huế", city="Huế", province="Huế", lat=16.44187, lon=107.61362),
+            Charger("HU_DC_03", "EcoCharge Hue", 30, 2200, address="Bãi đỗ xe trung tâm, Huế", city="Huế", province="Huế", lat=16.46000, lon=107.58000),
         ],
-        "Da Nang": [Charger("DN_DC_01", "VinFast Da Nang", 20, 3200, address="569 H7/2 Trần Cao Vân, phường Xuân Hà, quận Thanh Khê, Đà Nẵng, Vietnam", city="Đà Nẵng", province="Đà Nẵng", lat=16.07044, lon=108.18820)],
+        "Da Nang": [
+            Charger("DN_DC_01", "VinFast Da Nang", 20, 3200, address="569 H7/2 Trần Cao Vân, phường Xuân Hà, quận Thanh Khê, Đà Nẵng", city="Đà Nẵng", province="Đà Nẵng", lat=16.07044, lon=108.18820)
+        ],
     }
     alias_map = {"ha noi": "Ha Noi", "thanh hoa": "Thanh Hoa", "vinh": "Vinh", "ha tinh": "Ha Tinh", "quang binh": "Quang Binh", "hue": "Hue", "da nang": "Da Nang"}
     expanded = dict(chargers)
@@ -531,9 +585,11 @@ def create_planner() -> EVTripPlanner:
         station_selector=ChargingStationSelector(chargers_by_location=build_mock_chargers()),
     )
 
-def run_scenario(title: str, planner: EVTripPlanner, start_location: str, stops: List[Stop], vehicle: Vehicle, battery: BatteryState) -> None:
-    print(f"\n{'='*80}\n{title}\n{'='*80}")
-    result = planner.plan_trip(start_location=start_location, stops=stops, vehicle=vehicle, battery=battery)
+def run_scenario(title: str, planner: EVTripPlanner, start_location: str, stops: List[Stop], vehicle: Vehicle, battery: BatteryState, policy: Optional[PlannerPolicy] = None) -> None:
+    if policy is None:
+        policy = PlannerPolicy(mode="balanced")
+    print(f"\n{'='*80}\n{title} (Policy: {policy.mode})\n{'='*80}")
+    result = planner.plan_trip(start_location=start_location, stops=stops, vehicle=vehicle, battery=battery, policy=policy)
     from pprint import pprint
     pprint(asdict(result))
 
@@ -545,6 +601,9 @@ def main() -> None:
     run_scenario("CASE 2 - Need 1 charging stop", planner, "Ha Noi", [Stop(name="Thanh pho Vinh")], vehicle, BatteryState(start_soc_percent=80.0))
     run_scenario("CASE 3 - Multiple stations (Hue)", planner, "Ha Noi", [Stop(name="Huế")], vehicle, BatteryState(start_soc_percent=80.0))
     run_scenario("CASE 4 - Long distance (Da Nang)", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0))
+    run_scenario("CASE 5 - Policy: min_cost", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="min_cost"))
+    run_scenario("CASE 6 - Policy: min_stops", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="min_stops"))
+    run_scenario("CASE 7 - Policy: balanced", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="balanced"))
 
 if __name__ == "__main__":
     main()

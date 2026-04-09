@@ -33,7 +33,7 @@ Hệ thống Agentic Chatbot thông minh cho xe điện VinFast, tích hợp 3 t
 | Thành viên | Phần | Output |
 |:---:|:---|:---|
 | **Trần Văn Tuấn** | **AI Agent Architect**: Thiết kế sơ đồ đa tác vụ (LangGraph), cấu trúc Graph State, Router, Researcher, Summarizer và Guardrails Node. | `agent.py`, `toolsCS.py` |
-| **[Tên của bạn]** | **UX & Prompt Engineer**: Thiết kế conversation flow, viết System Prompt cho các Node và xây dựng ít nhất 3 bộ few-shot examples. | `extras/prompt-test-logs.md` |
+| **[Nguyễn Thành Đạt]** | **UX & Prompt Engineer**: Thiết kế conversation flow, viết System Prompt cho các Node và xây dựng ít nhất 3 bộ few-shot examples. | `extras/prompt-test-logs.md` |
 | **Lê Đình Việt** | **Data Engineering (RAG)**: Làm sạch và cấu trúc dữ liệu từ định dạng văn bản sang `Danh_Sach_Xe_Toi_Uu.json`, đảm bảo chính xác 100%. | `Danh_Sach_Xe_Toi_Uu.json` |
 | **[Hồ Bảo Thư]** | **EV Trip Planner & Dijkstra**: Phát triển thuật toán `EVTripPlanner` dựa trên Dijkstra để tính toán điểm dừng sạc tối ưu. | `tools.py` |
 | **[Nguyễn Đình Hiếu]** | **UI Prototype (Gradio)**: Xây dựng giao diện Web Demo bằng Gradio, tích hợp Chat Streaming và ProgressBar hiển thị pin. | `toolsCS.py`, Link Gradio Demo |

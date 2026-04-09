@@ -10,7 +10,7 @@ try:
 except ImportError:
     pass
 
-GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY", "")
+GEOAPIFY_API_KEY = os.getenv("GEOAPIFY_API_KEY", "c3c8e2ab399146fab964eec0f737c517")
 
 # =========================================================
 # Data Models

@@ -18,7 +18,6 @@ Pain:
 - Phải đọc nhiều nguồn hoặc hỏi nhân viên
 - Câu hỏi lặp lại (range, sạc, giá, ưu đãi)
 - Phải kết nối với nhân viên nhiều lần trong thời gian ngắn khi muốn nhắn với nhân viên
-- Không có chỗ tạo đoạn chat mới
 
 Auto hay Aug?
 
@@ -48,9 +47,7 @@ Trust recovery?
 
 Có:
 - Escalate sang nhân viên khi không trả lời được
-- Hỏi lại khi câu hỏi mơ hồ
-Thiếu:
-- Show confidence|
+- Hỏi lại khi câu hỏi mơ hồ|
 
 Cost: thấp, khoảng $0.001/GPT-4o
 
@@ -366,3 +363,6 @@ Marginal value: mô hình nền có kiến thức chung, nhưng các thông tin 
 ---
 
 *AI Product Canvas — Ngày 5 — VinUni A20 — AI Thực Chiến · 2026*
+
+
+Tôi đang xây dựng một hệ thống chatbot của vinfast. Có thể tìm kiếm thông tin, so sánh, tổng hợp thông tin của xe vinfast. Bên cạnh đó, có thể tìm kiếm, thông tin chính sách hậu mãi,... Một chức năng nổi bật là lên kết hoạch lộ trình đường đi, tối ưu số lần sạc. 

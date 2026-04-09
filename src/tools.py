@@ -104,6 +104,20 @@ class PlannerResult:
     errors: List[str] = field(default_factory=list)
 
 
+@dataclass
+class PlannerPolicy:
+    mode: str = "balanced"  # min_time | min_cost | min_stops | balanced
+    max_corridor_km: float = 15.0
+    min_charger_power_kw: float = 0.0
+    preferred_min_arrival_soc_percent: float = 10.0
+
+    weight_drive_time: float = 1.0
+    weight_charge_time: float = 1.0
+    weight_charge_cost: float = 0.001
+    weight_num_stops: float = 25.0
+    weight_low_soc_risk: float = 3.0
+
+
 # =========================================================
 # Tool 1: Travel Time Tool
 # =========================================================
@@ -112,97 +126,93 @@ import requests
 from typing import Dict, Any, Optional
 
 
-import unicodedata
-import math
-
-def safe_normalize(text: str) -> str:
-    text = text.strip().lower()
-    text = unicodedata.normalize("NFD", text)
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
-    text = text.replace("tp.", "").replace("thanh pho", "")
-    return " ".join(text.split())
-
-PREDEFINED_COORDS = {
-    "ha noi": (21.0285, 105.8542),
-    "thanh hoa": (19.8075, 105.7761),
-    "nghe an": (18.6733, 105.6813),
-    "vinh": (18.6733, 105.6813),
-    "ha tinh": (18.3411, 105.9056),
-    "quang binh": (17.4833, 106.5983),
-    "dong hoi": (17.4833, 106.5983),
-    "quang tri": (16.8202, 107.1009),
-    "hue": (16.4637, 107.5909),
-    "da nang": (16.0544, 108.2022)
-}
-
-def mock_haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0
-    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
 class TravelTimeTool:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
+        self.base_url = "https://api.geoapify.com/v1/routing"
+        self.geocode_url = "https://api.geoapify.com/v1/geocode/search"
         self._coord_cache = {}
 
     def geocode(self, location_name: str) -> tuple[float, float]:
-        loc_lower = safe_normalize(location_name)
-        for k, v in PREDEFINED_COORDS.items():
-            if k in loc_lower:
-                return v
-
         if location_name in self._coord_cache:
             res = self._coord_cache[location_name]
             if isinstance(res, tuple):
                 return res
 
-        # FALLBACK MOCK for locations not in predefined list (creates a random coordinate slightly south of Hanoi)
-        print(f"⚠️ Geo Mock: Dùng toạ độ giả định cho {location_name}")
-        return (20.5, 105.8)
+        import urllib.parse
+        encoded_name = urllib.parse.quote(location_name)
+        url = f"{self.geocode_url}?text={encoded_name}&filter=countrycode:vn&apiKey={self.api_key}"
+        
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise ValueError(f"Geocoding API error: {response.status_code}")
+        
+        data = response.json()
+        if not data.get("features"):
+            raise ValueError(f"Location not found: {location_name}")
+        
+        coords = data["features"][0]["geometry"]["coordinates"] # [lon, lat]
+        lat, lon = float(coords[1]), float(coords[0])
+        
+        self._coord_cache[location_name] = (lat, lon)
+        return (lat, lon)
 
-    def get_route_summary(self, origin: Any, destination: Any) -> Dict[str, float]:
+    def _build_url(self, origin: Any, destination: Any) -> str:
         def get_lat_lon(loc):
             if isinstance(loc, (tuple, list)) and len(loc) == 2:
                 return loc[0], loc[1]
             return self.geocode(str(loc))
-            
+
         try:
             lat1, lon1 = get_lat_lon(origin)
             lat2, lon2 = get_lat_lon(destination)
-            
-            # Tỉ lệ 1.3 cho đường bộ Quốc Lộ 1A
-            dist_km = mock_haversine(lat1, lon1, lat2, lon2) * 1.3 
-            return {
-                "distance_km": dist_km,
-                "drive_time_min": dist_km * 1.2 # vận tốc 50km/h
-            }
         except Exception as e:
-            raise ValueError(f"Error resolving coordinates offline: {str(e)}")
+            raise ValueError(f"Error resolving coordinates in build_url: {str(e)}")
+            
+        return (
+            f"{self.base_url}"
+            f"?waypoints={lat1},{lon1}|{lat2},{lon2}"
+            f"&mode=drive"
+            f"&apiKey={self.api_key}"
+        )
+
+    def get_route_summary(self, origin: str, destination: str) -> Dict[str, float]:
+        url = self._build_url(origin, destination)
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise ValueError(f"Geoapify API error: {response.text}")
+        data = response.json()
+        try:
+            route = data["features"][0]["properties"]
+            return {
+                "distance_km": route["distance"] / 1000.0,
+                "drive_time_min": route["time"] / 60.0,
+            }
+        except Exception:
+            raise ValueError("Invalid response from Geoapify")
 
     def get_route_detail(
         self,
         origin: str,
         destination: str,
     ) -> Dict[str, Any]:
-        lat1, lon1 = self.geocode(origin)
-        lat2, lon2 = self.geocode(destination)
-        dist_km = mock_haversine(lat1, lon1, lat2, lon2) * 1.3
-        
-        # Vẽ một polyline thẳng có 100 điểm để dễ bắt trạm sạc
-        points = []
-        for i in range(101):
-            f = i / 100.0
-            plat = lat1 + (lat2 - lat1) * f
-            plon = lon1 + (lon2 - lon1) * f
-            points.append([plon, plat])
-            
-        return {
-            "distance_km": dist_km,
-            "drive_time_min": dist_km * 1.2,
-            "geometry": [points],
-            "legs": []
-        }
+        url = self._build_url(origin, destination)
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise ValueError(f"Geoapify API error: {response.text}")
+        data = response.json()
+        try:
+            feature = data["features"][0]
+            properties = feature["properties"]
+            geometry = feature["geometry"]["coordinates"]
+            return {
+                "distance_km": properties["distance"] / 1000.0,
+                "drive_time_min": properties["time"] / 60.0,
+                "geometry": geometry,
+                "legs": properties.get("legs", []),
+            }
+        except Exception:
+            raise ValueError("Invalid detailed route from Geoapify")
 
 # =========================================================
 # Tool 2: Energy Consumption Tool
@@ -334,7 +344,10 @@ class EVTripPlanner:
         stops: List[Stop],
         vehicle: Vehicle,
         battery: BatteryState,
+        policy: Optional[PlannerPolicy] = None,
     ) -> PlannerResult:
+        if policy is None:
+            policy = PlannerPolicy()
         warnings = []
         destination = stops[-1].name
         
@@ -347,7 +360,7 @@ class EVTripPlanner:
             return self._fail(str(e), battery)
 
         # 2. Find chargers along route corridor
-        near_chargers = self.station_selector.find_chargers_near_route(polyline, threshold_km=15.0)
+        near_chargers = self.station_selector.find_chargers_near_route(polyline, threshold_km=policy.max_corridor_km)
         print(f"📍 FOUND {len(near_chargers)} CHARGERS NEAR ROUTE CORRIDOR.")
 
         # 3. Geocode start and destination
@@ -361,22 +374,23 @@ class EVTripPlanner:
         import heapq
         nodes = [{"name": start_location, "type": "origin", "lat": start_lat, "lon": start_lon}]
         for c in near_chargers:
-            nodes.append({"name": c.station_name, "type": "charger", "lat": c.lat, "lon": c.lon, "charger": c})
+            if c.power_kw >= policy.min_charger_power_kw:
+                nodes.append({"name": c.station_name, "type": "charger", "lat": c.lat, "lon": c.lon, "charger": c})
         nodes.append({"name": destination, "type": "destination", "lat": dest_lat, "lon": dest_lon})
         
         n_count = len(nodes)
-        min_times = [float("inf")] * n_count
+        best_metrics = [float("inf")] * n_count
         parents = [-1] * n_count
         soc_at_node = [0.0] * n_count
         edge_details = [None] * n_count
         
-        queue = [(0.0, 0, battery.start_soc_percent)] # (time, node_idx, current_soc)
-        min_times[0] = 0.0
+        queue = [(0.0, 0, battery.start_soc_percent)] 
+        best_metrics[0] = 0.0
         soc_at_node[0] = battery.start_soc_percent
         
         while queue:
-            curr_time, u_idx, u_soc = heapq.heappop(queue)
-            if curr_time > min_times[u_idx]: continue
+            curr_metric, u_idx, u_soc = heapq.heappop(queue)
+            if curr_metric > best_metrics[u_idx]: continue
             u = nodes[u_idx]
             d_u_dest = haversine(u["lat"], u["lon"], dest_lat, dest_lon)
             
@@ -426,9 +440,29 @@ class EVTripPlanner:
                     else: continue
                 
                 v_arrival_soc = actual_u_soc - energy_est["soc_used_percent"]
-                new_total_time = curr_time + charge_time + drive_time
-                if new_total_time < min_times[v_idx]:
-                    min_times[v_idx] = new_total_time
+                charge_cost = charge_info["charging_cost_vnd"] if charge_info else 0.0
+                num_stops = 1.0 if charge_info else 0.0
+                low_soc_risk = max(0.0, policy.preferred_min_arrival_soc_percent - v_arrival_soc)
+                
+                if policy.mode == "min_time":
+                    step_metric = drive_time + charge_time
+                elif policy.mode == "min_cost":
+                    step_metric = charge_cost
+                elif policy.mode == "min_stops":
+                    step_metric = num_stops
+                else:
+                    step_metric = (
+                        drive_time * policy.weight_drive_time +
+                        charge_time * policy.weight_charge_time +
+                        charge_cost * policy.weight_charge_cost +
+                        num_stops * policy.weight_num_stops +
+                        low_soc_risk * policy.weight_low_soc_risk
+                    )
+                
+                new_total_metric = curr_metric + step_metric
+                
+                if new_total_metric < best_metrics[v_idx]:
+                    best_metrics[v_idx] = new_total_metric
                     parents[v_idx] = u_idx
                     soc_at_node[v_idx] = v_arrival_soc
                     edge_details[v_idx] = {
@@ -440,10 +474,10 @@ class EVTripPlanner:
                         },
                         "charge": charge_info
                     }
-                    heapq.heappush(queue, (new_total_time, v_idx, v_arrival_soc))
+                    heapq.heappush(queue, (new_total_metric, v_idx, v_arrival_soc))
 
         dest_idx = n_count - 1
-        if min_times[dest_idx] == float("inf"):
+        if best_metrics[dest_idx] == float("inf"):
             return self._fail("Không tìm thấy lộ trình khả thi.", battery)
             
         final_itinerary = []
@@ -501,54 +535,9 @@ def haversine(lat1, lon1, lat2, lon2):
     a = (math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-import json
-import re
-import os
-
-def load_hanoi_chargers_from_json() -> List[Charger]:
-    json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "hanoi_stations.json")
-    if not os.path.exists(json_path):
-        return []
-    
-    chargers = []
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            
-        for item in data:
-            if item.get("charging_status") in ["INACTIVE", "UNAVAILABLE", "OUTOFSERVICE"]:
-                continue
-            
-            connectors_str = item.get("connectors", "")
-            matches = re.findall(r'(\d+(?:\.\d+)?)kW', connectors_str)
-            power = max(float(m) for m in matches) if matches else 20.0
-            
-            try:
-                lat = float(item.get("lat"))
-                lon = float(item.get("lng"))
-            except (TypeError, ValueError):
-                continue
-                
-            c = Charger(
-                station_id=item.get("store_id", item.get("entity_id", "UNK")),
-                station_name=item.get("name", "VinFast Station"),
-                power_kw=power,
-                price_per_kwh_vnd=3858.0,
-                address=item.get("address", ""),
-                city="Hà Nội",
-                province="Hà Nội",
-                lat=lat,
-                lon=lon
-            )
-            chargers.append(c)
-    except Exception as e:
-        print(f"Error loading Hanoi stations: {e}")
-        
-    return chargers
-
 def build_mock_chargers() -> Dict[str, List[Charger]]:
     chargers = {
-        "Ha Noi": load_hanoi_chargers_from_json(),
+        "Ha Noi": [Charger("HN_DC_01", "VinFast Ha Noi Fast", 60, 3000, address="Số 1 Thanh Huệ Trại, Đa Phúc, Hà Nội, Vietnam", city="Hà Nội", province="Hà Nội", lat=21.23182, lon=105.86744)],
         "Thanh Hoa": [
             Charger("TH_DC_01", "VinFast Bim Son", 60, 3100, address="134 Ngõ 430 Trần Phú, phường Lam Sơn, thị xã Bỉm Sơn, Thanh Hóa, Vietnam", city="Bỉm Sơn", province="Thanh Hóa", lat=20.07097, lon=105.88590),
             Charger("TH_DC_02", "VinFast TP Thanh Hoa", 60, 3100, address="Tân Hạnh, Đông Tân, Thành phố Thanh Hóa, Thanh Hóa, Vietnam", city="Thành phố Thanh Hóa", province="Thanh Hóa", lat=19.72846, lon=105.83582),
@@ -565,11 +554,6 @@ def build_mock_chargers() -> Dict[str, List[Charger]]:
         ],
         "Da Nang": [Charger("DN_DC_01", "VinFast Da Nang", 20, 3200, address="569 H7/2 Trần Cao Vân, phường Xuân Hà, quận Thanh Khê, Đà Nẵng, Vietnam", city="Đà Nẵng", province="Đà Nẵng", lat=16.07044, lon=108.18820)],
     }
-    
-    if not chargers["Ha Noi"]: 
-        print("Fallback to mock data for Ha Noi")
-        chargers["Ha Noi"] = [Charger("HN_DC_01", "VinFast Ha Noi Mock", 60, 3000, address="Số 1 Thanh Huệ Trại, Đa Phúc, Hà Nội, Vietnam", city="Hà Nội", province="Hà Nội", lat=21.23182, lon=105.86744)]
-
     alias_map = {"ha noi": "Ha Noi", "thanh hoa": "Thanh Hoa", "vinh": "Vinh", "ha tinh": "Ha Tinh", "quang binh": "Quang Binh", "hue": "Hue", "da nang": "Da Nang"}
     expanded = dict(chargers)
     for alias, canonical in alias_map.items():
@@ -585,9 +569,11 @@ def create_planner() -> EVTripPlanner:
         station_selector=ChargingStationSelector(chargers_by_location=build_mock_chargers()),
     )
 
-def run_scenario(title: str, planner: EVTripPlanner, start_location: str, stops: List[Stop], vehicle: Vehicle, battery: BatteryState) -> None:
-    print(f"\n{'='*80}\n{title}\n{'='*80}")
-    result = planner.plan_trip(start_location=start_location, stops=stops, vehicle=vehicle, battery=battery)
+def run_scenario(title: str, planner: EVTripPlanner, start_location: str, stops: List[Stop], vehicle: Vehicle, battery: BatteryState, policy: Optional[PlannerPolicy] = None) -> None:
+    if policy is None:
+        policy = PlannerPolicy(mode="balanced")
+    print(f"\n{'='*80}\n{title} (Policy: {policy.mode})\n{'='*80}")
+    result = planner.plan_trip(start_location=start_location, stops=stops, vehicle=vehicle, battery=battery, policy=policy)
     from pprint import pprint
     pprint(asdict(result))
 
@@ -599,6 +585,9 @@ def main() -> None:
     run_scenario("CASE 2 - Need 1 charging stop", planner, "Ha Noi", [Stop(name="Thanh pho Vinh")], vehicle, BatteryState(start_soc_percent=80.0))
     run_scenario("CASE 3 - Multiple stations (Hue)", planner, "Ha Noi", [Stop(name="Huế")], vehicle, BatteryState(start_soc_percent=80.0))
     run_scenario("CASE 4 - Long distance (Da Nang)", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0))
+    run_scenario("CASE 5 - Policy: min_cost", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="min_cost"))
+    run_scenario("CASE 6 - Policy: min_stops", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="min_stops"))
+    run_scenario("CASE 7 - Policy: balanced", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="balanced"))
 
 if __name__ == "__main__":
     main()

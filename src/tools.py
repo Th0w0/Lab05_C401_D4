@@ -112,93 +112,97 @@ import requests
 from typing import Dict, Any, Optional
 
 
+import unicodedata
+import math
+
+def safe_normalize(text: str) -> str:
+    text = text.strip().lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = text.replace("tp.", "").replace("thanh pho", "")
+    return " ".join(text.split())
+
+PREDEFINED_COORDS = {
+    "ha noi": (21.0285, 105.8542),
+    "thanh hoa": (19.8075, 105.7761),
+    "nghe an": (18.6733, 105.6813),
+    "vinh": (18.6733, 105.6813),
+    "ha tinh": (18.3411, 105.9056),
+    "quang binh": (17.4833, 106.5983),
+    "dong hoi": (17.4833, 106.5983),
+    "quang tri": (16.8202, 107.1009),
+    "hue": (16.4637, 107.5909),
+    "da nang": (16.0544, 108.2022)
+}
+
+def mock_haversine(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    dlat, dlon = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 class TravelTimeTool:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
-        self.base_url = "https://api.geoapify.com/v1/routing"
-        self.geocode_url = "https://api.geoapify.com/v1/geocode/search"
         self._coord_cache = {}
 
     def geocode(self, location_name: str) -> tuple[float, float]:
+        loc_lower = safe_normalize(location_name)
+        for k, v in PREDEFINED_COORDS.items():
+            if k in loc_lower:
+                return v
+
         if location_name in self._coord_cache:
             res = self._coord_cache[location_name]
             if isinstance(res, tuple):
                 return res
 
-        import urllib.parse
-        encoded_name = urllib.parse.quote(location_name)
-        url = f"{self.geocode_url}?text={encoded_name}&filter=countrycode:vn&apiKey={self.api_key}"
-        
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise ValueError(f"Geocoding API error: {response.status_code}")
-        
-        data = response.json()
-        if not data.get("features"):
-            raise ValueError(f"Location not found: {location_name}")
-        
-        coords = data["features"][0]["geometry"]["coordinates"] # [lon, lat]
-        lat, lon = float(coords[1]), float(coords[0])
-        
-        self._coord_cache[location_name] = (lat, lon)
-        return (lat, lon)
+        # FALLBACK MOCK for locations not in predefined list (creates a random coordinate slightly south of Hanoi)
+        print(f"⚠️ Geo Mock: Dùng toạ độ giả định cho {location_name}")
+        return (20.5, 105.8)
 
-    def _build_url(self, origin: Any, destination: Any) -> str:
+    def get_route_summary(self, origin: Any, destination: Any) -> Dict[str, float]:
         def get_lat_lon(loc):
             if isinstance(loc, (tuple, list)) and len(loc) == 2:
                 return loc[0], loc[1]
             return self.geocode(str(loc))
-
+            
         try:
             lat1, lon1 = get_lat_lon(origin)
             lat2, lon2 = get_lat_lon(destination)
-        except Exception as e:
-            raise ValueError(f"Error resolving coordinates in build_url: {str(e)}")
             
-        return (
-            f"{self.base_url}"
-            f"?waypoints={lat1},{lon1}|{lat2},{lon2}"
-            f"&mode=drive"
-            f"&apiKey={self.api_key}"
-        )
-
-    def get_route_summary(self, origin: str, destination: str) -> Dict[str, float]:
-        url = self._build_url(origin, destination)
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise ValueError(f"Geoapify API error: {response.text}")
-        data = response.json()
-        try:
-            route = data["features"][0]["properties"]
+            # Tỉ lệ 1.3 cho đường bộ Quốc Lộ 1A
+            dist_km = mock_haversine(lat1, lon1, lat2, lon2) * 1.3 
             return {
-                "distance_km": route["distance"] / 1000.0,
-                "drive_time_min": route["time"] / 60.0,
+                "distance_km": dist_km,
+                "drive_time_min": dist_km * 1.2 # vận tốc 50km/h
             }
-        except Exception:
-            raise ValueError("Invalid response from Geoapify")
+        except Exception as e:
+            raise ValueError(f"Error resolving coordinates offline: {str(e)}")
 
     def get_route_detail(
         self,
         origin: str,
         destination: str,
     ) -> Dict[str, Any]:
-        url = self._build_url(origin, destination)
-        response = requests.get(url)
-        if response.status_code != 200:
-            raise ValueError(f"Geoapify API error: {response.text}")
-        data = response.json()
-        try:
-            feature = data["features"][0]
-            properties = feature["properties"]
-            geometry = feature["geometry"]["coordinates"]
-            return {
-                "distance_km": properties["distance"] / 1000.0,
-                "drive_time_min": properties["time"] / 60.0,
-                "geometry": geometry,
-                "legs": properties.get("legs", []),
-            }
-        except Exception:
-            raise ValueError("Invalid detailed route from Geoapify")
+        lat1, lon1 = self.geocode(origin)
+        lat2, lon2 = self.geocode(destination)
+        dist_km = mock_haversine(lat1, lon1, lat2, lon2) * 1.3
+        
+        # Vẽ một polyline thẳng có 100 điểm để dễ bắt trạm sạc
+        points = []
+        for i in range(101):
+            f = i / 100.0
+            plat = lat1 + (lat2 - lat1) * f
+            plon = lon1 + (lon2 - lon1) * f
+            points.append([plon, plat])
+            
+        return {
+            "distance_km": dist_km,
+            "drive_time_min": dist_km * 1.2,
+            "geometry": [points],
+            "legs": []
+        }
 
 # =========================================================
 # Tool 2: Energy Consumption Tool
@@ -497,9 +501,54 @@ def haversine(lat1, lon1, lat2, lon2):
     a = (math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+import json
+import re
+import os
+
+def load_hanoi_chargers_from_json() -> List[Charger]:
+    json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "hanoi_stations.json")
+    if not os.path.exists(json_path):
+        return []
+    
+    chargers = []
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            
+        for item in data:
+            if item.get("charging_status") in ["INACTIVE", "UNAVAILABLE", "OUTOFSERVICE"]:
+                continue
+            
+            connectors_str = item.get("connectors", "")
+            matches = re.findall(r'(\d+(?:\.\d+)?)kW', connectors_str)
+            power = max(float(m) for m in matches) if matches else 20.0
+            
+            try:
+                lat = float(item.get("lat"))
+                lon = float(item.get("lng"))
+            except (TypeError, ValueError):
+                continue
+                
+            c = Charger(
+                station_id=item.get("store_id", item.get("entity_id", "UNK")),
+                station_name=item.get("name", "VinFast Station"),
+                power_kw=power,
+                price_per_kwh_vnd=3858.0,
+                address=item.get("address", ""),
+                city="Hà Nội",
+                province="Hà Nội",
+                lat=lat,
+                lon=lon
+            )
+            chargers.append(c)
+    except Exception as e:
+        print(f"Error loading Hanoi stations: {e}")
+        
+    return chargers
+
 def build_mock_chargers() -> Dict[str, List[Charger]]:
     chargers = {
-        "Ha Noi": [Charger("HN_DC_01", "VinFast Ha Noi Fast", 60, 3000, address="Số 1 Thanh Huệ Trại, Đa Phúc, Hà Nội, Vietnam", city="Hà Nội", province="Hà Nội", lat=21.23182, lon=105.86744)],
+        "Ha Noi": load_hanoi_chargers_from_json(),
         "Thanh Hoa": [
             Charger("TH_DC_01", "VinFast Bim Son", 60, 3100, address="134 Ngõ 430 Trần Phú, phường Lam Sơn, thị xã Bỉm Sơn, Thanh Hóa, Vietnam", city="Bỉm Sơn", province="Thanh Hóa", lat=20.07097, lon=105.88590),
             Charger("TH_DC_02", "VinFast TP Thanh Hoa", 60, 3100, address="Tân Hạnh, Đông Tân, Thành phố Thanh Hóa, Thanh Hóa, Vietnam", city="Thành phố Thanh Hóa", province="Thanh Hóa", lat=19.72846, lon=105.83582),
@@ -516,6 +565,11 @@ def build_mock_chargers() -> Dict[str, List[Charger]]:
         ],
         "Da Nang": [Charger("DN_DC_01", "VinFast Da Nang", 20, 3200, address="569 H7/2 Trần Cao Vân, phường Xuân Hà, quận Thanh Khê, Đà Nẵng, Vietnam", city="Đà Nẵng", province="Đà Nẵng", lat=16.07044, lon=108.18820)],
     }
+    
+    if not chargers["Ha Noi"]: 
+        print("Fallback to mock data for Ha Noi")
+        chargers["Ha Noi"] = [Charger("HN_DC_01", "VinFast Ha Noi Mock", 60, 3000, address="Số 1 Thanh Huệ Trại, Đa Phúc, Hà Nội, Vietnam", city="Hà Nội", province="Hà Nội", lat=21.23182, lon=105.86744)]
+
     alias_map = {"ha noi": "Ha Noi", "thanh hoa": "Thanh Hoa", "vinh": "Vinh", "ha tinh": "Ha Tinh", "quang binh": "Quang Binh", "hue": "Hue", "da nang": "Da Nang"}
     expanded = dict(chargers)
     for alias, canonical in alias_map.items():

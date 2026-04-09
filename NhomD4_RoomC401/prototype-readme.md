@@ -37,4 +37,4 @@ Hệ thống Agentic Chatbot thông minh cho xe điện VinFast, tích hợp 3 t
 | **Lê Đình Việt** | **Data Engineering (RAG)**: Làm sạch và cấu trúc dữ liệu từ định dạng văn bản sang `Danh_Sach_Xe_Toi_Uu.json`, đảm bảo chính xác 100%. | `Danh_Sach_Xe_Toi_Uu.json` |
 | **[Hồ Bảo Thư]** | **EV Trip Planner & Dijkstra**: Phát triển thuật toán `EVTripPlanner` dựa trên Dijkstra để tính toán điểm dừng sạc tối ưu. | `tools.py` |
 | **[Nguyễn Đình Hiếu]** | **UI Prototype (Gradio)**: Xây dựng giao diện Web Demo bằng Gradio, tích hợp Chat Streaming và ProgressBar hiển thị pin. | `toolsCS.py`, Link Gradio Demo |
-| **[Thành viên 6]** | **Evaluation & Roadmapping**: Thiết kế bộ Eval metrics (Precision/Recall cho Triage), kịch bản ROI và định hướng phát triển. | `spec/spec-final.md`, `demo/slides.pdf` |
+| **[Nguyễn Trần Hải Ninh]** | **Evaluation & Roadmapping**: Thiết kế bộ Eval metrics (Precision/Recall cho Triage), kịch bản ROI và định hướng phát triển. | `spec/spec-final.md`, `demo/slides.pdf` |

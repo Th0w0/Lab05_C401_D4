@@ -104,6 +104,20 @@ class PlannerResult:
     errors: List[str] = field(default_factory=list)
 
 
+@dataclass
+class PlannerPolicy:
+    mode: str = "balanced"  # min_time | min_cost | min_stops | balanced
+    max_corridor_km: float = 15.0
+    min_charger_power_kw: float = 0.0
+    preferred_min_arrival_soc_percent: float = 10.0
+
+    weight_drive_time: float = 1.0
+    weight_charge_time: float = 1.0
+    weight_charge_cost: float = 0.001
+    weight_num_stops: float = 25.0
+    weight_low_soc_risk: float = 3.0
+
+
 # =========================================================
 # Tool 1: Travel Time Tool
 # =========================================================
@@ -330,7 +344,10 @@ class EVTripPlanner:
         stops: List[Stop],
         vehicle: Vehicle,
         battery: BatteryState,
+        policy: Optional[PlannerPolicy] = None,
     ) -> PlannerResult:
+        if policy is None:
+            policy = PlannerPolicy()
         warnings = []
         destination = stops[-1].name
         
@@ -343,7 +360,7 @@ class EVTripPlanner:
             return self._fail(str(e), battery)
 
         # 2. Find chargers along route corridor
-        near_chargers = self.station_selector.find_chargers_near_route(polyline, threshold_km=15.0)
+        near_chargers = self.station_selector.find_chargers_near_route(polyline, threshold_km=policy.max_corridor_km)
         print(f"📍 FOUND {len(near_chargers)} CHARGERS NEAR ROUTE CORRIDOR.")
 
         # 3. Geocode start and destination
@@ -357,22 +374,23 @@ class EVTripPlanner:
         import heapq
         nodes = [{"name": start_location, "type": "origin", "lat": start_lat, "lon": start_lon}]
         for c in near_chargers:
-            nodes.append({"name": c.station_name, "type": "charger", "lat": c.lat, "lon": c.lon, "charger": c})
+            if c.power_kw >= policy.min_charger_power_kw:
+                nodes.append({"name": c.station_name, "type": "charger", "lat": c.lat, "lon": c.lon, "charger": c})
         nodes.append({"name": destination, "type": "destination", "lat": dest_lat, "lon": dest_lon})
         
         n_count = len(nodes)
-        min_times = [float("inf")] * n_count
+        best_metrics = [float("inf")] * n_count
         parents = [-1] * n_count
         soc_at_node = [0.0] * n_count
         edge_details = [None] * n_count
         
-        queue = [(0.0, 0, battery.start_soc_percent)] # (time, node_idx, current_soc)
-        min_times[0] = 0.0
+        queue = [(0.0, 0, battery.start_soc_percent)] 
+        best_metrics[0] = 0.0
         soc_at_node[0] = battery.start_soc_percent
         
         while queue:
-            curr_time, u_idx, u_soc = heapq.heappop(queue)
-            if curr_time > min_times[u_idx]: continue
+            curr_metric, u_idx, u_soc = heapq.heappop(queue)
+            if curr_metric > best_metrics[u_idx]: continue
             u = nodes[u_idx]
             d_u_dest = haversine(u["lat"], u["lon"], dest_lat, dest_lon)
             
@@ -422,9 +440,29 @@ class EVTripPlanner:
                     else: continue
                 
                 v_arrival_soc = actual_u_soc - energy_est["soc_used_percent"]
-                new_total_time = curr_time + charge_time + drive_time
-                if new_total_time < min_times[v_idx]:
-                    min_times[v_idx] = new_total_time
+                charge_cost = charge_info["charging_cost_vnd"] if charge_info else 0.0
+                num_stops = 1.0 if charge_info else 0.0
+                low_soc_risk = max(0.0, policy.preferred_min_arrival_soc_percent - v_arrival_soc)
+                
+                if policy.mode == "min_time":
+                    step_metric = drive_time + charge_time
+                elif policy.mode == "min_cost":
+                    step_metric = charge_cost
+                elif policy.mode == "min_stops":
+                    step_metric = num_stops
+                else:
+                    step_metric = (
+                        drive_time * policy.weight_drive_time +
+                        charge_time * policy.weight_charge_time +
+                        charge_cost * policy.weight_charge_cost +
+                        num_stops * policy.weight_num_stops +
+                        low_soc_risk * policy.weight_low_soc_risk
+                    )
+                
+                new_total_metric = curr_metric + step_metric
+                
+                if new_total_metric < best_metrics[v_idx]:
+                    best_metrics[v_idx] = new_total_metric
                     parents[v_idx] = u_idx
                     soc_at_node[v_idx] = v_arrival_soc
                     edge_details[v_idx] = {
@@ -436,10 +474,10 @@ class EVTripPlanner:
                         },
                         "charge": charge_info
                     }
-                    heapq.heappush(queue, (new_total_time, v_idx, v_arrival_soc))
+                    heapq.heappush(queue, (new_total_metric, v_idx, v_arrival_soc))
 
         dest_idx = n_count - 1
-        if min_times[dest_idx] == float("inf"):
+        if best_metrics[dest_idx] == float("inf"):
             return self._fail("Không tìm thấy lộ trình khả thi.", battery)
             
         final_itinerary = []
@@ -531,9 +569,11 @@ def create_planner() -> EVTripPlanner:
         station_selector=ChargingStationSelector(chargers_by_location=build_mock_chargers()),
     )
 
-def run_scenario(title: str, planner: EVTripPlanner, start_location: str, stops: List[Stop], vehicle: Vehicle, battery: BatteryState) -> None:
-    print(f"\n{'='*80}\n{title}\n{'='*80}")
-    result = planner.plan_trip(start_location=start_location, stops=stops, vehicle=vehicle, battery=battery)
+def run_scenario(title: str, planner: EVTripPlanner, start_location: str, stops: List[Stop], vehicle: Vehicle, battery: BatteryState, policy: Optional[PlannerPolicy] = None) -> None:
+    if policy is None:
+        policy = PlannerPolicy(mode="balanced")
+    print(f"\n{'='*80}\n{title} (Policy: {policy.mode})\n{'='*80}")
+    result = planner.plan_trip(start_location=start_location, stops=stops, vehicle=vehicle, battery=battery, policy=policy)
     from pprint import pprint
     pprint(asdict(result))
 
@@ -545,6 +585,9 @@ def main() -> None:
     run_scenario("CASE 2 - Need 1 charging stop", planner, "Ha Noi", [Stop(name="Thanh pho Vinh")], vehicle, BatteryState(start_soc_percent=80.0))
     run_scenario("CASE 3 - Multiple stations (Hue)", planner, "Ha Noi", [Stop(name="Huế")], vehicle, BatteryState(start_soc_percent=80.0))
     run_scenario("CASE 4 - Long distance (Da Nang)", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0))
+    run_scenario("CASE 5 - Policy: min_cost", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="min_cost"))
+    run_scenario("CASE 6 - Policy: min_stops", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="min_stops"))
+    run_scenario("CASE 7 - Policy: balanced", planner, "Ha Noi", [Stop(name="Da Nang")], vehicle, BatteryState(start_soc_percent=80.0), policy=PlannerPolicy(mode="balanced"))
 
 if __name__ == "__main__":
     main()
